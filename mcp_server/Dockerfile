@@ -4,14 +4,23 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+RUN rm -rf /etc/apt/sources.list.d/* && \
+    echo "Acquire::ForceIPv4 \"true\";" > /etc/apt/apt.conf.d/99force-ipv4 && \
+    echo "deb http://mirrors.aliyun.com/debian bookworm main contrib non-free non-free-firmware" > /etc/apt/sources.list && \
+    echo "deb http://mirrors.aliyun.com/debian bookworm-updates main contrib non-free non-free-firmware" >> /etc/apt/sources.list && \
+    echo "deb http://mirrors.aliyun.com/debian-security bookworm-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list && \
+    apt-get update -qq && \
+    apt-get install -y -qq --no-install-recommends \
+        curl \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/99force-ipv4
 
 # Install uv using the installer script
-ADD https://astral.sh/uv/install.sh /uv-installer.sh
-RUN sh /uv-installer.sh && rm /uv-installer.sh
+# ADD https://astral.sh/uv/install.sh /uv-installer.sh
+# RUN sh /uv-installer.sh && rm /uv-installer.sh
+
+COPY uv /root/.local/bin/
+RUN chmod 755 /root/.local/bin/uv
 
 # Add uv to PATH
 ENV PATH="/root/.local/bin:${PATH}"
