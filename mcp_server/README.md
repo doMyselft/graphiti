@@ -65,7 +65,7 @@ cd graphiti && pwd
 
 1. Ensure you have Python 3.10 or higher installed.
 2. A running Neo4j database (version 5.26 or later required)
-3. OpenAI API key for LLM operations
+3. Google API key for Gemini LLM operations
 
 ### Setup
 
@@ -87,17 +87,11 @@ The server uses the following environment variables:
 - `NEO4J_URI`: URI for the Neo4j database (default: `bolt://localhost:7687`)
 - `NEO4J_USER`: Neo4j username (default: `neo4j`)
 - `NEO4J_PASSWORD`: Neo4j password (default: `demodemo`)
-- `OPENAI_API_KEY`: OpenAI API key (required for LLM operations)
-- `OPENAI_BASE_URL`: Optional base URL for OpenAI API
-- `MODEL_NAME`: OpenAI model name to use for LLM operations.
-- `SMALL_MODEL_NAME`: OpenAI model name to use for smaller LLM operations.
-- `LLM_TEMPERATURE`: Temperature for LLM responses (0.0-2.0).
-- `AZURE_OPENAI_ENDPOINT`: Optional Azure OpenAI LLM endpoint URL
-- `AZURE_OPENAI_DEPLOYMENT_NAME`: Optional Azure OpenAI LLM deployment name
-- `AZURE_OPENAI_API_VERSION`: Optional Azure OpenAI LLM API version
-- `AZURE_OPENAI_EMBEDDING_API_KEY`: Optional Azure OpenAI Embedding deployment key (if other than `OPENAI_API_KEY`)
-- `AZURE_OPENAI_EMBEDDING_ENDPOINT`: Optional Azure OpenAI Embedding endpoint URL
-- `AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME`: Optional Azure OpenAI embedding deployment name
+- `GOOGLE_API_KEY` / `GEMINI_API_KEY` / `GENAI_API_KEY`: Google API key (required for Gemini LLM operations)
+- `MODEL_NAME`: Gemini model name to use for LLM operations (default: `gemini-2.0-flash`)
+- `SMALL_MODEL_NAME`: Gemini model name to use for smaller LLM operations (default: `gemini-2.5-flash-lite-preview-06-17`)
+- `EMBEDDER_MODEL_NAME`: Gemini embedding model name (default: `embedding-001`)
+- `LLM_TEMPERATURE`: Temperature for LLM responses (0.0-2.0, default: 0.0)
 - `AZURE_OPENAI_EMBEDDING_API_VERSION`: Optional Azure OpenAI API version
 - `AZURE_OPENAI_USE_MANAGED_IDENTITY`: Optional use Azure Managed Identities for authentication
 - `SEMAPHORE_LIMIT`: Episode processing concurrency. See [Concurrency and LLM Provider 429 Rate Limit Errors](#concurrency-and-llm-provider-429-rate-limit-errors)
@@ -115,7 +109,7 @@ uv run graphiti_mcp_server.py
 With options:
 
 ```bash
-uv run graphiti_mcp_server.py --model gpt-4.1-mini --transport sse
+uv run graphiti_mcp_server.py --model gemini-2.0-flash --transport sse
 ```
 
 Available arguments:
@@ -131,9 +125,9 @@ Available arguments:
 ### Concurrency and LLM Provider 429 Rate Limit Errors
 
 Graphiti's ingestion pipelines are designed for high concurrency, controlled by the `SEMAPHORE_LIMIT` environment variable.
-By default, `SEMAPHORE_LIMIT` is set to `10` concurrent operations to help prevent `429` rate limit errors from your LLM provider. If you encounter such errors, try lowering this value.
+By default, `SEMAPHORE_LIMIT` is set to `10` concurrent operations to help prevent `429` rate limit errors from Google Gemini API. If you encounter such errors, try lowering this value.
 
-If your LLM provider allows higher throughput, you can increase `SEMAPHORE_LIMIT` to boost episode ingestion performance.
+If Google Gemini API allows higher throughput, you can increase `SEMAPHORE_LIMIT` to boost episode ingestion performance.
 
 ### Docker Deployment
 
@@ -150,20 +144,20 @@ Before running the Docker Compose setup, you need to configure the environment v
      ```bash
      cp .env.example .env
      ```
-   - Edit the `.env` file to set your OpenAI API key and other configuration options:
+   - Edit the `.env` file to set your Google API key and other configuration options:
      ```
-     # Required for LLM operations
-     OPENAI_API_KEY=your_openai_api_key_here
-     MODEL_NAME=gpt-4.1-mini
-     # Optional: OPENAI_BASE_URL only needed for non-standard OpenAI endpoints
-     # OPENAI_BASE_URL=https://api.openai.com/v1
+     # Required for Gemini LLM operations
+     GOOGLE_API_KEY=your_google_api_key_here
+     MODEL_NAME=gemini-2.0-flash
+     SMALL_MODEL_NAME=gemini-2.5-flash-lite-preview-06-17
+     EMBEDDER_MODEL_NAME=embedding-001
      ```
    - The Docker Compose setup is configured to use this file if it exists (it's optional)
 
 2. **Using environment variables directly**:
    - You can also set the environment variables when running the Docker Compose command:
      ```bash
-     OPENAI_API_KEY=your_key MODEL_NAME=gpt-4.1-mini docker compose up
+     GOOGLE_API_KEY=your_key MODEL_NAME=gemini-2.0-flash docker compose up
      ```
 
 #### Neo4j Configuration

@@ -12,21 +12,17 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any, TypedDict, cast
 
-from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
-from openai import AsyncAzureOpenAI
 from pydantic import BaseModel, Field
 
 from graphiti_core import Graphiti
 from graphiti_core.edges import EntityEdge
-from graphiti_core.embedder.azure_openai import AzureOpenAIEmbedderClient
 from graphiti_core.embedder.client import EmbedderClient
-from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
+from graphiti_core.embedder.gemini import GeminiEmbedder, GeminiEmbedderConfig
 from graphiti_core.llm_client import LLMClient
-from graphiti_core.llm_client.azure_openai_client import AzureOpenAILLMClient
 from graphiti_core.llm_client.config import LLMConfig
-from graphiti_core.llm_client.openai_client import OpenAIClient
+from graphiti_core.llm_client.gemini_client import GeminiClient
 from graphiti_core.nodes import EpisodeType, EpisodicNode
 from graphiti_core.search.search_config_recipes import (
     NODE_HYBRID_SEARCH_NODE_DISTANCE,
@@ -38,9 +34,9 @@ from graphiti_core.utils.maintenance.graph_data_operations import clear_data
 load_dotenv()
 
 
-DEFAULT_LLM_MODEL = 'gpt-4.1-mini'
-SMALL_LLM_MODEL = 'gpt-4.1-nano'
-DEFAULT_EMBEDDER_MODEL = 'text-embedding-3-small'
+DEFAULT_LLM_MODEL = 'gemini-2.0-flash'
+SMALL_LLM_MODEL = 'gemini-2.5-flash-lite-preview-06-17'
+DEFAULT_EMBEDDER_MODEL = 'embedding-001'
 
 # Semaphore limit for concurrent Graphiti operations.
 # Decrease this if you're experiencing 429 rate limit errors from your LLM provider.
@@ -167,19 +163,11 @@ class StatusResponse(TypedDict):
     message: str
 
 
-def create_azure_credential_token_provider() -> Callable[[], str]:
-    credential = DefaultAzureCredential()
-    token_provider = get_bearer_token_provider(
-        credential, 'https://cognitiveservices.azure.com/.default'
-    )
-    return token_provider
-
-
 # Server configuration classes
 # The configuration system has a hierarchy:
 # - GraphitiConfig is the top-level configuration
-#   - LLMConfig handles all OpenAI/LLM related settings
-#   - EmbedderConfig manages embedding settings
+#   - LLMConfig handles all Gemini LLM related settings
+#   - EmbedderConfig manages Gemini embedding settings
 #   - Neo4jConfig manages database connection details
 #   - Various other settings like group_id and feature flags
 # Configuration values are loaded from:
@@ -187,7 +175,7 @@ def create_azure_credential_token_provider() -> Callable[[], str]:
 # 2. Environment variables (loaded via load_dotenv())
 # 3. Command line arguments (which override environment variables)
 class GraphitiLLMConfig(BaseModel):
-    """Configuration for the LLM client.
+    """Configuration for the Gemini LLM client.
 
     Centralizes all LLM-specific configuration parameters including API keys and model selection.
     """
@@ -196,10 +184,6 @@ class GraphitiLLMConfig(BaseModel):
     model: str = DEFAULT_LLM_MODEL
     small_model: str = SMALL_LLM_MODEL
     temperature: float = 0.0
-    azure_openai_endpoint: str | None = None
-    azure_openai_deployment_name: str | None = None
-    azure_openai_api_version: str | None = None
-    azure_openai_use_managed_identity: bool = False
 
     @classmethod
     def from_env(cls) -> 'GraphitiLLMConfig':
@@ -212,55 +196,29 @@ class GraphitiLLMConfig(BaseModel):
         small_model_env = os.environ.get('SMALL_MODEL_NAME', '')
         small_model = small_model_env if small_model_env.strip() else SMALL_LLM_MODEL
 
-        azure_openai_endpoint = os.environ.get('AZURE_OPENAI_ENDPOINT', None)
-        azure_openai_api_version = os.environ.get('AZURE_OPENAI_API_VERSION', None)
-        azure_openai_deployment_name = os.environ.get('AZURE_OPENAI_DEPLOYMENT_NAME', None)
-        azure_openai_use_managed_identity = (
-            os.environ.get('AZURE_OPENAI_USE_MANAGED_IDENTITY', 'false').lower() == 'true'
+        # Try multiple possible environment variable names for Google API key
+        api_key = (
+            os.environ.get('GOOGLE_API_KEY') or 
+            os.environ.get('GEMINI_API_KEY') or 
+            os.environ.get('GENAI_API_KEY')
         )
 
-        if azure_openai_endpoint is None:
-            # Setup for OpenAI API
-            # Log if empty model was provided
-            if model_env == '':
-                logger.debug(
-                    f'MODEL_NAME environment variable not set, using default: {DEFAULT_LLM_MODEL}'
-                )
-            elif not model_env.strip():
-                logger.warning(
-                    f'Empty MODEL_NAME environment variable, using default: {DEFAULT_LLM_MODEL}'
-                )
-
-            return cls(
-                api_key=os.environ.get('OPENAI_API_KEY'),
-                model=model,
-                small_model=small_model,
-                temperature=float(os.environ.get('LLM_TEMPERATURE', '0.0')),
+        # Log if empty model was provided
+        if model_env == '':
+            logger.debug(
+                f'MODEL_NAME environment variable not set, using default: {DEFAULT_LLM_MODEL}'
             )
-        else:
-            # Setup for Azure OpenAI API
-            # Log if empty deployment name was provided
-            if azure_openai_deployment_name is None:
-                logger.error('AZURE_OPENAI_DEPLOYMENT_NAME environment variable not set')
-
-                raise ValueError('AZURE_OPENAI_DEPLOYMENT_NAME environment variable not set')
-            if not azure_openai_use_managed_identity:
-                # api key
-                api_key = os.environ.get('OPENAI_API_KEY', None)
-            else:
-                # Managed identity
-                api_key = None
-
-            return cls(
-                azure_openai_use_managed_identity=azure_openai_use_managed_identity,
-                azure_openai_endpoint=azure_openai_endpoint,
-                api_key=api_key,
-                azure_openai_api_version=azure_openai_api_version,
-                azure_openai_deployment_name=azure_openai_deployment_name,
-                model=model,
-                small_model=small_model,
-                temperature=float(os.environ.get('LLM_TEMPERATURE', '0.0')),
+        elif not model_env.strip():
+            logger.warning(
+                f'Empty MODEL_NAME environment variable, using default: {DEFAULT_LLM_MODEL}'
             )
+
+        return cls(
+            api_key=api_key,
+            model=model,
+            small_model=small_model,
+            temperature=float(os.environ.get('LLM_TEMPERATURE', '0.0')),
+        )
 
     @classmethod
     def from_cli_and_env(cls, args: argparse.Namespace) -> 'GraphitiLLMConfig':
@@ -289,75 +247,32 @@ class GraphitiLLMConfig(BaseModel):
         return config
 
     def create_client(self) -> LLMClient:
-        """Create an LLM client based on this configuration.
+        """Create a Gemini LLM client based on this configuration.
 
         Returns:
             LLMClient instance
         """
-
-        if self.azure_openai_endpoint is not None:
-            # Azure OpenAI API setup
-            if self.azure_openai_use_managed_identity:
-                # Use managed identity for authentication
-                token_provider = create_azure_credential_token_provider()
-                return AzureOpenAILLMClient(
-                    azure_client=AsyncAzureOpenAI(
-                        azure_endpoint=self.azure_openai_endpoint,
-                        azure_deployment=self.azure_openai_deployment_name,
-                        api_version=self.azure_openai_api_version,
-                        azure_ad_token_provider=token_provider,
-                    ),
-                    config=LLMConfig(
-                        api_key=self.api_key,
-                        model=self.model,
-                        small_model=self.small_model,
-                        temperature=self.temperature,
-                    ),
-                )
-            elif self.api_key:
-                # Use API key for authentication
-                return AzureOpenAILLMClient(
-                    azure_client=AsyncAzureOpenAI(
-                        azure_endpoint=self.azure_openai_endpoint,
-                        azure_deployment=self.azure_openai_deployment_name,
-                        api_version=self.azure_openai_api_version,
-                        api_key=self.api_key,
-                    ),
-                    config=LLMConfig(
-                        api_key=self.api_key,
-                        model=self.model,
-                        small_model=self.small_model,
-                        temperature=self.temperature,
-                    ),
-                )
-            else:
-                raise ValueError('OPENAI_API_KEY must be set when using Azure OpenAI API')
-
         if not self.api_key:
-            raise ValueError('OPENAI_API_KEY must be set when using OpenAI API')
+            raise ValueError('Google API key must be set (GOOGLE_API_KEY, GEMINI_API_KEY, or GENAI_API_KEY environment variable)')
 
         llm_client_config = LLMConfig(
-            api_key=self.api_key, model=self.model, small_model=self.small_model
+            api_key=self.api_key, 
+            model=self.model, 
+            small_model=self.small_model,
+            temperature=self.temperature
         )
 
-        # Set temperature
-        llm_client_config.temperature = self.temperature
-
-        return OpenAIClient(config=llm_client_config)
+        return GeminiClient(config=llm_client_config)
 
 
 class GraphitiEmbedderConfig(BaseModel):
-    """Configuration for the embedder client.
+    """Configuration for the Gemini embedder client.
 
     Centralizes all embedding-related configuration parameters.
     """
 
     model: str = DEFAULT_EMBEDDER_MODEL
     api_key: str | None = None
-    azure_openai_endpoint: str | None = None
-    azure_openai_deployment_name: str | None = None
-    azure_openai_api_version: str | None = None
-    azure_openai_use_managed_identity: bool = False
 
     @classmethod
     def from_env(cls) -> 'GraphitiEmbedderConfig':
@@ -367,86 +282,34 @@ class GraphitiEmbedderConfig(BaseModel):
         model_env = os.environ.get('EMBEDDER_MODEL_NAME', '')
         model = model_env if model_env.strip() else DEFAULT_EMBEDDER_MODEL
 
-        azure_openai_endpoint = os.environ.get('AZURE_OPENAI_EMBEDDING_ENDPOINT', None)
-        azure_openai_api_version = os.environ.get('AZURE_OPENAI_EMBEDDING_API_VERSION', None)
-        azure_openai_deployment_name = os.environ.get(
-            'AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME', None
+        # Try multiple possible environment variable names for Google API key
+        api_key = (
+            os.environ.get('GOOGLE_API_KEY') or 
+            os.environ.get('GEMINI_API_KEY') or 
+            os.environ.get('GENAI_API_KEY')
         )
-        azure_openai_use_managed_identity = (
-            os.environ.get('AZURE_OPENAI_USE_MANAGED_IDENTITY', 'false').lower() == 'true'
+
+        return cls(
+            model=model,
+            api_key=api_key,
         )
-        if azure_openai_endpoint is not None:
-            # Setup for Azure OpenAI API
-            # Log if empty deployment name was provided
-            azure_openai_deployment_name = os.environ.get(
-                'AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME', None
-            )
-            if azure_openai_deployment_name is None:
-                logger.error('AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME environment variable not set')
-
-                raise ValueError(
-                    'AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME environment variable not set'
-                )
-
-            if not azure_openai_use_managed_identity:
-                # api key
-                api_key = os.environ.get('AZURE_OPENAI_EMBEDDING_API_KEY', None) or os.environ.get(
-                    'OPENAI_API_KEY', None
-                )
-            else:
-                # Managed identity
-                api_key = None
-
-            return cls(
-                azure_openai_use_managed_identity=azure_openai_use_managed_identity,
-                azure_openai_endpoint=azure_openai_endpoint,
-                api_key=api_key,
-                azure_openai_api_version=azure_openai_api_version,
-                azure_openai_deployment_name=azure_openai_deployment_name,
-            )
-        else:
-            return cls(
-                model=model,
-                api_key=os.environ.get('OPENAI_API_KEY'),
-            )
 
     def create_client(self) -> EmbedderClient | None:
-        if self.azure_openai_endpoint is not None:
-            # Azure OpenAI API setup
-            if self.azure_openai_use_managed_identity:
-                # Use managed identity for authentication
-                token_provider = create_azure_credential_token_provider()
-                return AzureOpenAIEmbedderClient(
-                    azure_client=AsyncAzureOpenAI(
-                        azure_endpoint=self.azure_openai_endpoint,
-                        azure_deployment=self.azure_openai_deployment_name,
-                        api_version=self.azure_openai_api_version,
-                        azure_ad_token_provider=token_provider,
-                    ),
-                    model=self.model,
-                )
-            elif self.api_key:
-                # Use API key for authentication
-                return AzureOpenAIEmbedderClient(
-                    azure_client=AsyncAzureOpenAI(
-                        azure_endpoint=self.azure_openai_endpoint,
-                        azure_deployment=self.azure_openai_deployment_name,
-                        api_version=self.azure_openai_api_version,
-                        api_key=self.api_key,
-                    ),
-                    model=self.model,
-                )
-            else:
-                logger.error('OPENAI_API_KEY must be set when using Azure OpenAI API')
-                return None
-        else:
-            # OpenAI API setup
-            if not self.api_key:
-                return None
+        """Create a Gemini embedder client based on this configuration.
 
-            embedder_config = OpenAIEmbedderConfig(api_key=self.api_key, embedding_model=self.model)
+        Returns:
+            EmbedderClient instance or None if API key is not available
+        """
+        if not self.api_key:
+            logger.error('Google API key must be set (GOOGLE_API_KEY, GEMINI_API_KEY, or GENAI_API_KEY environment variable)')
+            return None
 
-            return OpenAIEmbedder(config=embedder_config)
+        embedder_config = GeminiEmbedderConfig(
+            api_key=self.api_key, 
+            embedding_model=self.model
+        )
+
+        return GeminiEmbedder(config=embedder_config)
 
 
 class Neo4jConfig(BaseModel):
@@ -552,14 +415,14 @@ Key capabilities:
 4. Retrieve specific entity edges or episodes by UUID
 5. Manage the knowledge graph with tools like delete_episode, delete_entity_edge, and clear_graph
 
-The server connects to a database for persistent storage and uses language models for certain operations. 
+The server connects to a database for persistent storage and uses Google Gemini language models for operations. 
 Each piece of information is organized by group_id, allowing you to maintain separate knowledge domains.
 
 When adding information, provide descriptive names and detailed content to improve search quality. 
 When searching, use specific queries and consider filtering by group_id for more relevant results.
 
 For optimal performance, ensure the database is properly configured and accessible, and valid 
-API keys are provided for any language model operations.
+Google API key is provided for Gemini model operations.
 """
 
 # MCP server instance
@@ -581,7 +444,7 @@ async def initialize_graphiti():
         llm_client = config.llm.create_client()
         if not llm_client and config.use_custom_entities:
             # If custom entities are enabled, we must have an LLM client
-            raise ValueError('OPENAI_API_KEY must be set when custom entities are enabled')
+            raise ValueError('Google API key must be set when custom entities are enabled')
 
         # Validate Neo4j configuration
         if not config.neo4j.uri or not config.neo4j.user or not config.neo4j.password:
@@ -610,7 +473,7 @@ async def initialize_graphiti():
 
         # Log configuration details for transparency
         if llm_client:
-            logger.info(f'Using OpenAI model: {config.llm.model}')
+            logger.info(f'Using Gemini model: {config.llm.model}')
             logger.info(f'Using temperature: {config.llm.temperature}')
         else:
             logger.info('No LLM client configured - entity extraction will be limited')
